@@ -21,3 +21,4 @@ __pycache__/
 
 # lab.sh local state (account tracking, archived state, apply logs)
 .lab/
+.ecr_err

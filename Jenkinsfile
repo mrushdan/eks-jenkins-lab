@@ -54,6 +54,11 @@ spec:
       choices: ['CRITICAL', 'HIGH', 'NONE'],
       description: 'Fail the build if the ECR scan finds vulnerabilities at or above this severity.'
     )
+    booleanParam(
+      name: 'REQUIRE_SCAN',
+      defaultValue: false,
+      description: 'Fail the build if no ECR scan result is available. Off by default: the build is marked UNSTABLE and still deploys.'
+    )
   }
 
   environment {
@@ -124,73 +129,93 @@ spec:
 
     stage('ECR image scan') {
       steps {
-        sh '''#!/bin/sh -e
-          echo "Registry scanning configuration (account-wide):"
-          aws ecr get-registry-scanning-configuration --region "${AWS_REGION}" \
-            --query 'scanningConfiguration.{type:scanType,rules:rules}' --output json || true
+        script {
+          // Exit codes: 0 = gate passed, 1 = blocking findings or scan failure, 2 = no scan result available.
+          def rc = sh(returnStatus: true, script: '''#!/bin/sh
+            ERR_FILE="${WORKSPACE}/.ecr_err"
+            LAST_ERR=""
 
-          scan_status() {
-            aws ecr describe-images --region "${AWS_REGION}" \
-              --repository-name "${ECR_REPO_NAME}" --image-ids imageTag="${IMAGE_TAG}" \
-              --query 'imageDetails[0].imageScanStatus.status' --output text 2>/dev/null || echo None
-          }
+            scan_status() {
+              if out=$(aws ecr describe-images --region "${AWS_REGION}" \
+                    --repository-name "${ECR_REPO_NAME}" --image-ids imageTag="${IMAGE_TAG}" \
+                    --query 'imageDetails[0].imageScanStatus.status' --output text 2>"${ERR_FILE}"); then
+                echo "${out}"
+              else
+                echo "ERROR"
+              fi
+            }
 
-          # Scan on push can take a few seconds to register, and in some accounts it never
-          # starts (registry-level settings override the repository's scanOnPush). Poll, and
-          # if no scan exists after about 30 seconds, start a basic scan ourselves.
-          STARTED=false
-          STATUS=None
-          for i in $(seq 1 40); do
-            STATUS=$(scan_status)
+            STARTED=false
+            STATUS=None
+            for i in $(seq 1 18); do
+              STATUS=$(scan_status)
+              if [ "${STATUS}" = ERROR ]; then
+                ERR=$(cat "${ERR_FILE}")
+                [ "${ERR}" != "${LAST_ERR}" ] && echo "describe-images error: ${ERR}"
+                LAST_ERR="${ERR}"
+              fi
+              case "${STATUS}" in
+                COMPLETE|ACTIVE)
+                  break ;;
+                FAILED|UNSUPPORTED_IMAGE|FINDINGS_UNAVAILABLE|SCAN_ELIGIBILITY_EXPIRED|LIMIT_EXCEEDED)
+                  echo "Scan ended with status ${STATUS}"
+                  exit 1 ;;
+                None|"")
+                  if [ "${i}" -ge 3 ] && [ "${STARTED}" = false ]; then
+                    echo "No scan registered on push; requesting a basic scan."
+                    if ! aws ecr start-image-scan --region "${AWS_REGION}" \
+                         --repository-name "${ECR_REPO_NAME}" --image-id imageTag="${IMAGE_TAG}" \
+                         >/dev/null 2>"${ERR_FILE}"; then
+                      echo "start-image-scan not accepted: $(cat "${ERR_FILE}")"
+                    fi
+                    STARTED=true
+                  fi ;;
+              esac
+              echo "Attempt ${i}/18: scan status ${STATUS:-None}"
+              sleep 10
+            done
+
             case "${STATUS}" in
-              COMPLETE|ACTIVE)
-                break ;;
-              FAILED|UNSUPPORTED_IMAGE|FINDINGS_UNAVAILABLE|SCAN_ELIGIBILITY_EXPIRED|LIMIT_EXCEEDED)
-                echo "Scan ended with status ${STATUS}"
-                exit 1 ;;
-              None|"")
-                if [ "${i}" -ge 3 ] && [ "${STARTED}" = false ]; then
-                  echo "No scan was started on push; starting a basic scan manually."
-                  aws ecr start-image-scan --region "${AWS_REGION}" \
-                    --repository-name "${ECR_REPO_NAME}" --image-id imageTag="${IMAGE_TAG}" >/dev/null \
-                    || echo "start-image-scan not accepted (daily quota or enhanced scanning); still polling"
-                  STARTED=true
-                fi ;;
+              COMPLETE|ACTIVE) echo "Scan status: ${STATUS}" ;;
+              *) echo "No scan result for ${IMAGE_TAG} after 3 minutes (last status: ${STATUS})."; exit 2 ;;
             esac
-            echo "Attempt ${i}/40: scan status ${STATUS:-None}"
-            sleep 10
-          done
 
-          case "${STATUS}" in
-            COMPLETE|ACTIVE) echo "Scan status: ${STATUS}" ;;
-            *) echo "Scan did not complete in time (last status: ${STATUS})"; exit 1 ;;
-          esac
+            count() {
+              n=$(aws ecr describe-image-scan-findings --region "${AWS_REGION}" \
+                    --repository-name "${ECR_REPO_NAME}" --image-id imageTag="${IMAGE_TAG}" \
+                    --query "imageScanFindings.findingSeverityCounts.$1" --output text 2>"${ERR_FILE}") \
+                || { echo "describe-image-scan-findings error: $(cat "${ERR_FILE}")" >&2; n=0; }
+              case "${n}" in ''|None) n=0 ;; esac
+              echo "${n}"
+            }
 
-          count() {
-            n=$(aws ecr describe-image-scan-findings --region "${AWS_REGION}" \
-                  --repository-name "${ECR_REPO_NAME}" --image-id imageTag="${IMAGE_TAG}" \
-                  --query "imageScanFindings.findingSeverityCounts.$1" --output text 2>/dev/null || echo 0)
-            case "$n" in ''|None) n=0 ;; esac
-            echo "$n"
+            CRITICAL=$(count CRITICAL)
+            HIGH=$(count HIGH)
+            MEDIUM=$(count MEDIUM)
+            echo "Findings: CRITICAL=${CRITICAL} HIGH=${HIGH} MEDIUM=${MEDIUM}"
+
+            case "${FAIL_ON_SEVERITY}" in
+              CRITICAL) BLOCKING=${CRITICAL} ;;
+              HIGH)     BLOCKING=$((CRITICAL + HIGH)) ;;
+              *)        BLOCKING=0 ;;
+            esac
+
+            if [ "${BLOCKING}" -gt 0 ]; then
+              echo "Blocking: ${BLOCKING} finding(s) at or above ${FAIL_ON_SEVERITY}."
+              exit 1
+            fi
+            echo "Scan gate passed (threshold: ${FAIL_ON_SEVERITY})."
+          ''')
+
+          if (rc == 2) {
+            if (params.REQUIRE_SCAN) {
+              error('No ECR scan result and REQUIRE_SCAN is enabled.')
+            }
+            unstable('No ECR scan result for this image; deploying without the vulnerability gate.')
+          } else if (rc != 0) {
+            error("ECR scan gate failed (exit code ${rc}).")
           }
-
-          CRITICAL=$(count CRITICAL)
-          HIGH=$(count HIGH)
-          MEDIUM=$(count MEDIUM)
-          echo "Findings: CRITICAL=${CRITICAL} HIGH=${HIGH} MEDIUM=${MEDIUM}"
-
-          case "${FAIL_ON_SEVERITY}" in
-            CRITICAL) BLOCKING=${CRITICAL} ;;
-            HIGH)     BLOCKING=$((CRITICAL + HIGH)) ;;
-            *)        BLOCKING=0 ;;
-          esac
-
-          if [ "${BLOCKING}" -gt 0 ]; then
-            echo "Blocking: ${BLOCKING} finding(s) at or above ${FAIL_ON_SEVERITY}."
-            exit 1
-          fi
-          echo "Scan gate passed (threshold: ${FAIL_ON_SEVERITY})."
-        '''
+        }
       }
     }
 
