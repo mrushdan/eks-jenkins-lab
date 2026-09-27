@@ -35,26 +35,27 @@ a Jenkins controller on EC2, and a pipeline that builds inside the cluster and d
 5. **Deploy to EKS**: renders manifests with the image tag, waits for the rollout
 6. **Smoke test**: polls the ALB until it serves the new version
 
-## Quick start
+## Quick start (every new sandbox)
 
 ```bash
-cd infra/platform
-cp terraform.tfvars.example terraform.tfvars   # set github_repo_url
-# private repo only:
-export TF_VAR_github_username=YOUR_USER TF_VAR_github_token=ghp_xxx
-
-terraform init
-terraform apply                                # about 15 to 20 minutes
-
-terraform output jenkins_url
-terraform output -raw jenkins_admin_password
-terraform output github_webhook_url
-$(terraform output -raw configure_kubectl)
+./lab.sh up          # prompts for sandbox keys, archives stale state, applies, waits for Jenkins
+./lab.sh status      # account, session age, cluster, nodes, Jenkins health
+./lab.sh outputs     # Jenkins URL, admin password, webhook URL
 ```
 
-Log in as `admin`, add the webhook in GitHub (or click **Build with Parameters** once), and watch it run.
+`lab.sh up` handles the fresh-account problem for you:
 
-**Requirements on your laptop:** Terraform 1.10 or later, AWS CLI v2 (the Kubernetes and Helm providers call `aws eks get-token`), kubectl.
+- Stores the sandbox keys in an AWS CLI profile (`pluralsight`), not in your shell
+- Detects when the account ID changed and archives the previous sandbox's `terraform.tfstate` and kubeconfig entries into `.lab/archive/`
+- Creates `infra/platform/terraform.tfvars` from your git remote if it does not exist
+- Retries the apply once if a new cluster was not ready for the Kubernetes and Helm providers
+- Waits for Jenkins, then prints the login and the new webhook URL (update it in GitHub each sandbox)
+
+Options: `--yes` skips confirmations, `--new-creds` forces a credential prompt. `LAB_REGION=us-west-2 ./lab.sh up` switches region.
+
+For a private repo, export the token first: `export TF_VAR_github_username=YOUR_USER TF_VAR_github_token=ghp_xxx`
+
+**Requirements on your laptop:** bash, Terraform 1.10 or later, AWS CLI v2, kubectl, curl.
 
 ## Notes
 

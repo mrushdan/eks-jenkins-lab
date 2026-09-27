@@ -1,0 +1,12 @@
+# Keep Unix line endings in the repo and in every checkout, including Git for Windows.
+# CRLF breaks bash scripts (lab.sh) and the EC2 user data Terraform renders from templates/.
+* text=auto eol=lf
+
+*.sh      text eol=lf
+*.tftpl   text eol=lf
+*.tf      text eol=lf
+*.yaml    text eol=lf
+Jenkinsfile text eol=lf
+
+*.zip  binary
+*.png  binary
