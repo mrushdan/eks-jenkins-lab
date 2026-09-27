@@ -125,15 +125,52 @@ spec:
     stage('ECR image scan') {
       steps {
         sh '''#!/bin/sh -e
-          echo "Waiting for scan-on-push to finish for ${IMAGE_TAG}..."
-          aws ecr wait image-scan-complete --region "${AWS_REGION}" \
-            --repository-name "${ECR_REPO_NAME}" --image-id imageTag="${IMAGE_TAG}"
+          echo "Registry scanning configuration (account-wide):"
+          aws ecr get-registry-scanning-configuration --region "${AWS_REGION}" \
+            --query 'scanningConfiguration.{type:scanType,rules:rules}' --output json || true
+
+          scan_status() {
+            aws ecr describe-images --region "${AWS_REGION}" \
+              --repository-name "${ECR_REPO_NAME}" --image-ids imageTag="${IMAGE_TAG}" \
+              --query 'imageDetails[0].imageScanStatus.status' --output text 2>/dev/null || echo None
+          }
+
+          # Scan on push can take a few seconds to register, and in some accounts it never
+          # starts (registry-level settings override the repository's scanOnPush). Poll, and
+          # if no scan exists after about 30 seconds, start a basic scan ourselves.
+          STARTED=false
+          STATUS=None
+          for i in $(seq 1 40); do
+            STATUS=$(scan_status)
+            case "${STATUS}" in
+              COMPLETE|ACTIVE)
+                break ;;
+              FAILED|UNSUPPORTED_IMAGE|FINDINGS_UNAVAILABLE|SCAN_ELIGIBILITY_EXPIRED|LIMIT_EXCEEDED)
+                echo "Scan ended with status ${STATUS}"
+                exit 1 ;;
+              None|"")
+                if [ "${i}" -ge 3 ] && [ "${STARTED}" = false ]; then
+                  echo "No scan was started on push; starting a basic scan manually."
+                  aws ecr start-image-scan --region "${AWS_REGION}" \
+                    --repository-name "${ECR_REPO_NAME}" --image-id imageTag="${IMAGE_TAG}" >/dev/null \
+                    || echo "start-image-scan not accepted (daily quota or enhanced scanning); still polling"
+                  STARTED=true
+                fi ;;
+            esac
+            echo "Attempt ${i}/40: scan status ${STATUS:-None}"
+            sleep 10
+          done
+
+          case "${STATUS}" in
+            COMPLETE|ACTIVE) echo "Scan status: ${STATUS}" ;;
+            *) echo "Scan did not complete in time (last status: ${STATUS})"; exit 1 ;;
+          esac
 
           count() {
             n=$(aws ecr describe-image-scan-findings --region "${AWS_REGION}" \
                   --repository-name "${ECR_REPO_NAME}" --image-id imageTag="${IMAGE_TAG}" \
-                  --query "imageScanFindings.findingSeverityCounts.$1" --output text)
-            [ "$n" = "None" ] && n=0
+                  --query "imageScanFindings.findingSeverityCounts.$1" --output text 2>/dev/null || echo 0)
+            case "$n" in ''|None) n=0 ;; esac
             echo "$n"
           }
 
