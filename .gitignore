@@ -1,0 +1,20 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+
+# Pipeline scratch files
+.docker/
+.kube/
+rendered/
+.ecr_repo_url
+.alb_host
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+__pycache__/

@@ -1,0 +1,70 @@
+#!/bin/bash
+# Bootstraps a Jenkins controller that is fully configured on first boot (no setup wizard).
+# Log: /var/log/jenkins-bootstrap.log
+set -euo pipefail
+exec > >(tee -a /var/log/jenkins-bootstrap.log) 2>&1
+
+AWS_REGION="${aws_region}"
+CLUSTER_NAME="${cluster_name}"
+
+echo "==> Installing Java 21, git, and Jenkins LTS"
+dnf install -y java-21-amazon-corretto-headless fontconfig git
+curl -fsSL -o /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/rpm-stable/jenkins.repo
+rpm --import https://pkg.jenkins.io/rpm-stable/jenkins.io-2026.key || true
+dnf install -y jenkins
+
+echo "==> Installing plugins"
+PM_URL=$(curl -fsSL https://api.github.com/repos/jenkinsci/plugin-installation-manager-tool/releases/latest \
+  | grep -o '"browser_download_url": *"[^"]*\.jar"' | head -1 | cut -d'"' -f4)
+curl -fsSL -o /opt/jenkins-plugin-manager.jar "$PM_URL"
+cat > /opt/jenkins-plugins.txt <<'PLUGINS'
+${plugins}
+PLUGINS
+mkdir -p /var/lib/jenkins/plugins
+java -jar /opt/jenkins-plugin-manager.jar \
+  --war /usr/share/java/jenkins.war \
+  --plugin-download-directory /var/lib/jenkins/plugins \
+  --plugin-file /opt/jenkins-plugins.txt
+
+echo "==> Reading instance addresses (IMDSv2)"
+IMDS_TOKEN=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+PRIVATE_IP=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+PUBLIC_IP=$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+
+echo "==> Writing secrets from SSM Parameter Store"
+mkdir -p /etc/jenkins
+umask 077
+ADMIN_PW=$(aws ssm get-parameter --region "$AWS_REGION" --name "${admin_password_param}" --with-decryption --query Parameter.Value --output text)
+echo "JENKINS_ADMIN_PASSWORD=$ADMIN_PW" > /etc/jenkins/secrets.env
+%{ if github_token_param != "" ~}
+GH_TOKEN=$(aws ssm get-parameter --region "$AWS_REGION" --name "${github_token_param}" --with-decryption --query Parameter.Value --output text)
+echo "GITHUB_TOKEN=$GH_TOKEN" >> /etc/jenkins/secrets.env
+%{ endif ~}
+umask 022
+chown root:jenkins /etc/jenkins/secrets.env
+chmod 640 /etc/jenkins/secrets.env
+
+echo "==> Writing Configuration as Code"
+cat > /var/lib/jenkins/casc.yaml <<'CASC'
+${casc}
+CASC
+sed -i "s|__PRIVATE_IP__|$PRIVATE_IP|g; s|__PUBLIC_IP__|$PUBLIC_IP|g" /var/lib/jenkins/casc.yaml
+
+echo "==> Writing kubeconfig for the jenkins user"
+mkdir -p /var/lib/jenkins/.kube
+aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME" --kubeconfig /var/lib/jenkins/.kube/config
+chown -R jenkins:jenkins /var/lib/jenkins
+
+echo "==> Configuring the service"
+mkdir -p /etc/systemd/system/jenkins.service.d
+cat > /etc/systemd/system/jenkins.service.d/override.conf <<'OVERRIDE'
+[Service]
+Environment="JAVA_OPTS=-Djava.awt.headless=true -Djenkins.install.runSetupWizard=false"
+Environment="CASC_JENKINS_CONFIG=/var/lib/jenkins/casc.yaml"
+EnvironmentFile=/etc/jenkins/secrets.env
+OVERRIDE
+
+systemctl daemon-reload
+systemctl enable --now jenkins
+
+echo "==> Jenkins bootstrap complete: http://$PUBLIC_IP:8080/"

@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is git-ignored.
+
+github_repo_url = "https://github.com/YOUR_GITHUB_USER/eks-jenkins-lab.git"
+
+# Only for a PRIVATE repository. Leave both empty for a public repo.
+# Prefer passing the token via environment instead of this file:
+#   export TF_VAR_github_token=ghp_xxx
+github_username = ""
+# github_token  = ""
+
+# aws_region  = "us-east-1"
+# node_count  = 3

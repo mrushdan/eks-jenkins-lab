@@ -1,0 +1,85 @@
+# Jenkins Configuration as Code. Rendered by Terraform, then IP placeholders are filled at boot.
+jenkins:
+  systemMessage: "EKS Jenkins Lab. The controller runs no builds; every build runs as a pod on EKS cluster ${cluster_name}."
+  numExecutors: 0
+  mode: EXCLUSIVE
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "admin"
+          password: "$${JENKINS_ADMIN_PASSWORD}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+  globalNodeProperties:
+    - envVars:
+        env:
+          - key: "AWS_REGION"
+            value: "${aws_region}"
+          - key: "CLUSTER_NAME"
+            value: "${cluster_name}"
+          - key: "TF_STATE_BUCKET"
+            value: "${tf_state_bucket}"
+          - key: "ECR_REPO_NAME"
+            value: "${ecr_repo_name}"
+  clouds:
+    - kubernetes:
+        name: "eks"
+        # No serverUrl: the plugin reads /var/lib/jenkins/.kube/config, which uses
+        # `aws eks get-token` with the controller's instance role.
+        namespace: "jenkins"
+        jenkinsUrl: "http://__PRIVATE_IP__:8080/"
+        webSocket: true
+        containerCapStr: "${max_concurrent_agents}"
+
+unclassified:
+  location:
+    url: "http://__PUBLIC_IP__:8080/"
+
+security:
+  globalJobDslSecurityConfiguration:
+    useScriptSecurity: false
+
+%{ if github_token_enabled ~}
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - usernamePassword:
+              scope: GLOBAL
+              id: "github-token"
+              username: "${github_username}"
+              password: "$${GITHUB_TOKEN}"
+              description: "GitHub personal access token"
+
+%{ endif ~}
+jobs:
+  - script: |
+      pipelineJob('${job_name}') {
+        description('Terraform the ECR repo, build with Kaniko, scan, deploy to EKS, smoke test the ALB.')
+        properties {
+          pipelineTriggers {
+            triggers {
+              githubPush()
+            }
+          }
+        }
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('${github_repo_url}')
+%{ if github_token_enabled ~}
+                  credentials('github-token')
+%{ endif ~}
+                }
+                branch('*/main')
+              }
+            }
+            scriptPath('Jenkinsfile')
+            lightweight(true)
+          }
+        }
+      }
