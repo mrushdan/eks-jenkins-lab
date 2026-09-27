@@ -140,6 +140,33 @@ current_account() {
 
 # ---------- Credentials ----------
 
+credentials_file() {
+  printf '%s' "${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}"
+}
+
+# remove_session_token empty|any
+#   empty: drop only a blank aws_session_token line from this profile (heals old lab.sh runs)
+#   any:   drop the aws_session_token line from this profile whatever its value
+remove_session_token() {
+  local mode="$1" file tmp
+  file="$(credentials_file)"
+  [[ -f "$file" ]] || return 0
+  tmp="$(mktemp)"
+  if awk -v section="[$PROFILE]" -v mode="$mode" '
+      { line = $0; sub(/\r$/, "", line) }
+      line ~ /^[[:space:]]*\[/ { insec = (line == section) }
+      insec && line ~ /^[[:space:]]*aws_session_token[[:space:]]*=/ {
+        if (mode == "any" || line ~ /^[[:space:]]*aws_session_token[[:space:]]*=[[:space:]]*$/) { removed = 1; next }
+      }
+      { print }
+      END { exit removed ? 0 : 1 }
+    ' "$file" > "$tmp"; then
+    cat "$tmp" > "$file"   # cat keeps the original file's permissions
+    ok "removed aws_session_token from profile '$PROFILE'"
+  fi
+  rm -f "$tmp"
+}
+
 prompt_credentials() {
   step "Enter credentials for the new Pluralsight sandbox (profile '$PROFILE')"
   local key secret token
@@ -153,7 +180,10 @@ prompt_credentials() {
   if [[ -n "$token" ]]; then
     aws configure set aws_session_token "$token" --profile "$PROFILE"
   else
-    aws configure set aws_session_token "" --profile "$PROFILE"
+    # Never write a blank token: `aws eks get-token` puts it in the pre-signed URL as
+    # X-Amz-Security-Token= and STS rejects it (InvalidClientTokenId), so every
+    # Kubernetes login fails. Remove any token left over from an earlier sandbox instead.
+    remove_session_token any
   fi
   aws configure set region "$REGION" --profile "$PROFILE"
   aws configure set output json --profile "$PROFILE"
@@ -161,6 +191,7 @@ prompt_credentials() {
 
 ensure_credentials() {
   local account
+  remove_session_token empty
   if [[ "$FORCE_NEW_CREDS" == true ]]; then
     prompt_credentials
   else
