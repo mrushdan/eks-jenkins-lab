@@ -1,0 +1,10 @@
+{{ include "demo-app.fullname" . }} {{ .Values.image.tag }} is deployed to namespace {{ .Release.Namespace }}.
+
+{{- if .Values.ingress.enabled }}
+
+Get the public address (a new ALB takes 2 to 4 minutes):
+  kubectl -n {{ .Release.Namespace }} get ingress {{ include "demo-app.fullname" . }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+{{- end }}
+
+Run the in-cluster check:
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }} --logs

@@ -1,0 +1,83 @@
+{{- $fullname := include "my-microservice.fullname" . -}}
+{{- $password := required "db.password is required: add --set db.password=<value>" .Values.db.password -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $fullname }}-db
+  labels:
+    {{- include "my-microservice.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  password: {{ $password | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-db
+  labels:
+    {{- include "my-microservice.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "my-microservice.name" . }}-db
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-db
+  labels:
+    {{- include "my-microservice.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      # Different name label than WordPress, so the WordPress Service never routes to the database.
+      app.kubernetes.io/name: {{ include "my-microservice.name" . }}-db
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "my-microservice.name" . }}-db
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: mariadb
+          image: {{ .Values.db.image }}
+          ports:
+            - name: mysql
+              containerPort: 3306
+          env:
+            - name: MARIADB_DATABASE
+              value: {{ .Values.db.name | quote }}
+            - name: MARIADB_USER
+              value: {{ .Values.db.user | quote }}
+            - name: MARIADB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fullname }}-db
+                  key: password
+            - name: MARIADB_RANDOM_ROOT_PASSWORD
+              value: "1"
+          readinessProbe:
+            exec:
+              command: ["healthcheck.sh", "--connect", "--innodb_initialized"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: data
+          emptyDir: {}

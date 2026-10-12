@@ -1,0 +1,53 @@
+# Default values for demo-app. The pipeline sets image.repository and image.tag.
+
+replicaCount: 3
+
+image:
+  repository: ""   # required, for example 123456789012.dkr.ecr.us-east-1.amazonaws.com/eks-jenkins-lab/demo-app
+  tag: ""          # required, for example 1.0.0-3f9c2ab
+  pullPolicy: IfNotPresent
+
+containerPort: 8080
+healthPath: /healthz
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: alb
+  path: /
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    # "ip" sends traffic straight to pod IPs (no NodePort hop).
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "10"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    # Faster rollouts for a lab (default is 300 seconds).
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=15
+
+# Spread replicas across Availability Zones when possible.
+zoneSpread:
+  enabled: true
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    memory: 128Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# Image used by `helm test` to call the service from inside the cluster.
+testImage: busybox:1.37

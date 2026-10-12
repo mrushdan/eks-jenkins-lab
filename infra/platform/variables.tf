@@ -95,3 +95,9 @@ variable "ecr_repo_name" {
   type        = string
   default     = "eks-jenkins-lab/demo-app"
 }
+
+variable "metrics_server_chart_version" {
+  description = "Helm chart version for metrics-server (chart 3.14.0 ships metrics-server v0.9.0)."
+  type        = string
+  default     = "3.14.0"
+}

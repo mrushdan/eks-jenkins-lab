@@ -14,7 +14,7 @@ spec:
   serviceAccountName: jenkins-agent
   containers:
     - name: tools
-      image: alpine/k8s:1.35.6          # aws cli, kubectl, curl
+      image: alpine/k8s:1.35.6          # aws cli, kubectl, helm, curl
       command: ["cat"]
       tty: true
       resources:
@@ -63,7 +63,8 @@ spec:
 
   environment {
     APP_NAMESPACE = 'demo-app'
-    APP_NAME      = 'demo-app'
+    APP_NAME      = 'demo-app'            // Helm release name; also the Deployment, Service, and Ingress name
+    CHART_PATH    = 'charts/demo-app'
     KUBECONFIG    = "${WORKSPACE}/.kube/config"
   }
 
@@ -78,6 +79,22 @@ spec:
           currentBuild.displayName = "#${env.BUILD_NUMBER} ${env.IMAGE_TAG}"
         }
         echo "Image tag: ${env.IMAGE_TAG}"
+      }
+    }
+
+    stage('Helm lint') {
+      steps {
+        // Fail fast on chart mistakes before spending time on Terraform and the image build.
+        sh '''#!/bin/sh -e
+          helm version --short
+          helm lint "${CHART_PATH}" --strict \
+            --set image.repository=example.com/lint/demo-app \
+            --set image.tag="${IMAGE_TAG}"
+          helm template "${APP_NAME}" "${CHART_PATH}" --namespace "${APP_NAMESPACE}" \
+            --set image.repository=example.com/lint/demo-app \
+            --set image.tag="${IMAGE_TAG}" > /dev/null
+          echo "Chart renders cleanly."
+        '''
       }
     }
 
@@ -219,19 +236,37 @@ spec:
       }
     }
 
-    stage('Deploy to EKS') {
+    stage('Deploy with Helm') {
       steps {
         sh '''#!/bin/sh -e
           mkdir -p "$(dirname "${KUBECONFIG}")"
           aws eks update-kubeconfig --region "${AWS_REGION}" --name "${CLUSTER_NAME}" --kubeconfig "${KUBECONFIG}"
 
-          rm -rf rendered && mkdir rendered && cp k8s/*.yaml rendered/
-          sed -i "s|IMAGE_PLACEHOLDER|${ECR_REPO_URL}:${IMAGE_TAG}|g; s|VERSION_PLACEHOLDER|${IMAGE_TAG}|g" rendered/deployment.yaml
+          # Helm 4 renamed --atomic to --rollback-on-failure. Support either major version.
+          HELM_MAJOR=$(helm version --template '{{.Version}}' | sed 's/^v//; s/\\..*//')
+          if [ "${HELM_MAJOR}" -ge 4 ]; then ROLLBACK_FLAG="--rollback-on-failure"; else ROLLBACK_FLAG="--atomic"; fi
 
-          kubectl apply -f rendered/namespace.yaml
-          kubectl apply -f rendered/
-          kubectl -n "${APP_NAMESPACE}" rollout status "deployment/${APP_NAME}" --timeout=180s
-          kubectl -n "${APP_NAMESPACE}" get pods -o wide
+          # Install or upgrade. Waits for the rollout; on failure, Helm rolls back to the last good release.
+          helm upgrade --install "${APP_NAME}" "${CHART_PATH}" \
+            --namespace "${APP_NAMESPACE}" --create-namespace \
+            --set image.repository="${ECR_REPO_URL}" \
+            --set image.tag="${IMAGE_TAG}" \
+            ${ROLLBACK_FLAG} --wait --timeout 5m \
+            --description "Jenkins build ${BUILD_NUMBER}: image ${IMAGE_TAG}"
+
+          echo
+          helm history "${APP_NAME}" --namespace "${APP_NAMESPACE}" --max 5
+          echo
+          kubectl -n "${APP_NAMESPACE}" get pods -o wide -L app.kubernetes.io/version
+        '''
+      }
+    }
+
+    stage('Helm test') {
+      steps {
+        // Runs the chart's test pod, which calls the Service from inside the cluster (no ALB involved).
+        sh '''#!/bin/sh -e
+          helm test "${APP_NAME}" --namespace "${APP_NAMESPACE}" --logs --timeout 3m
         '''
       }
     }

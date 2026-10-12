@@ -1,0 +1,32 @@
+# `helm test` runs this pod after a deploy. It calls the Service from inside the
+# cluster, so it checks the app independently of the ALB.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "demo-app.fullname" . }}-test-connection
+  labels:
+    {{- include "demo-app.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+  containers:
+    - name: wget
+      image: {{ .Values.testImage }}
+      command: ["sh", "-c"]
+      args:
+        - |
+          set -e
+          wget -qO- http://{{ include "demo-app.fullname" . }}:{{ .Values.service.port }}{{ .Values.healthPath }}
+          echo
+          body=$(wget -qO- http://{{ include "demo-app.fullname" . }}:{{ .Values.service.port }}/)
+          echo "$body"
+          echo "$body" | grep -q '{{ .Values.image.tag }}'
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]

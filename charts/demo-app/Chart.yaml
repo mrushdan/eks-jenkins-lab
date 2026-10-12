@@ -1,0 +1,8 @@
+apiVersion: v2
+name: demo-app
+description: Demo service for the EKS Jenkins lab. Deployment, Service, and ALB Ingress.
+type: application
+# Chart version: bump when the chart itself (templates, defaults) changes.
+version: 0.1.0
+# App version shown by `helm list`. The pipeline deploys the real image tag via image.tag.
+appVersion: "1.0.0"
