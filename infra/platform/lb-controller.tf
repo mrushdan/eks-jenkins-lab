@@ -1,12 +1,15 @@
-# The controller's IAM policy is published per release. Pinning the URL to the same
-# version as the chart keeps the policy and the controller in sync.
-data "http" "lbc_iam_policy" {
-  url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/${var.lbc_version}/docs/install/iam_policy.json"
+# The controller's IAM policy is published per release. It is saved in this repo
+# (policies/) instead of downloaded at plan time, so plans never depend on GitHub
+# being reachable. When you change lbc_version, download the matching file:
+#   curl -fsSL -o policies/aws-load-balancer-controller-<version>.json \
+#     https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/<version>/docs/install/iam_policy.json
+locals {
+  lbc_policy_file = "${path.module}/policies/aws-load-balancer-controller-${var.lbc_version}.json"
 }
 
 resource "aws_iam_policy" "lbc" {
   name   = "${var.project_name}-aws-load-balancer-controller"
-  policy = data.http.lbc_iam_policy.response_body
+  policy = file(local.lbc_policy_file)
 }
 
 # Shared trust policy for every role assumed through EKS Pod Identity.
